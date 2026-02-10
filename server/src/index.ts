@@ -1,7 +1,6 @@
 import { Hono } from "hono";
-// import { streamTextHandler } from "./helpers/stream";
 import { model } from "@/lib/ai/google";
-import { consumeStream, smoothStream, streamText } from "ai";
+import { smoothStream, streamText } from "ai";
 import { cors } from "hono/cors";
 
 const promptHandler = (userPrompt: string) => `
@@ -33,23 +32,55 @@ app.post("/chat", async (c) => {
     try {
         const { prompt } = await c.req.json();
 
-        if (!prompt) return c.json({ message: "prompt not found" }, 404);
+        if (!prompt)
+            return c.json({ message: "prompt not found", type: "error" }, 404);
 
-        const result = streamText({
-            model,
-            prompt: promptHandler(prompt),
-            experimental_transform: smoothStream({
-                delayInMs: 30,
-                chunking: "word",
-            }),
+        const stream = new ReadableStream({
+            async start(controller) {
+                const result = streamText({
+                    model,
+                    prompt: promptHandler(prompt),
+                    experimental_transform: smoothStream({
+                        delayInMs: 30,
+                        chunking: "word",
+                    }),
+                    onError: (error) => {
+                        console.error("error happened!!!", error);
+
+                        controller.enqueue(
+                            JSON.stringify({
+                                type: "error",
+                                message: "Streaming failed....",
+                            }),
+                        );
+                        controller.close();
+                    },
+                });
+
+                for await (const chunk of result.textStream) {
+                    controller.enqueue(
+                        JSON.stringify({
+                            type: "token",
+                            value: chunk,
+                        }),
+                    );
+                }
+
+                controller.close();
+            },
         });
 
-        // return c.json({ text });
-
-        return result.toTextStreamResponse();
+        return new Response(stream);
     } catch (error) {
-        console.log("failed to /chat", error);
+        return c.json(
+            {
+                type: "error",
+                message:
+                    "failed to generate answer, check server logs for more details...",
+            },
+            500,
+        );
     }
 });
 
-export default app;
+export default { fetch: app.fetch, idleTimeout: 60 };

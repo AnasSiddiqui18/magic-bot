@@ -2,6 +2,7 @@ import { Text, Box, useInput } from "ink";
 import Spinner from "ink-spinner";
 import { useEffect, useState } from "react";
 import { jsonrepair } from "jsonrepair";
+import z from "zod";
 
 const TITLE = `
  ███╗   ███╗  █████╗   ██████╗  ██╗  ██████╗
@@ -23,6 +24,7 @@ type Message =
     | {
           content: string;
           id: string;
+          type: "error" | "token";
           role: "assistant";
       }
     | {
@@ -31,30 +33,25 @@ type Message =
           role: "user";
       };
 
-function repairJson(json: string) {
-    return jsonrepair(json);
-}
+const streamingResponseSchema = z.union([
+    z.object({ type: z.literal("error"), message: z.string() }),
+    z.object({ type: z.literal("token"), value: z.string() }),
+]);
 
 export default function App() {
     const [inputValue, setInputValue] = useState("");
-    const [messages, setMessages] = useState<Message[]>([
-        // {
-        //     role: "user",
-        //     content: "why we dont push .env files in production actually??",
-        //     id: crypto.randomUUID(),
-        // },
-        // {
-        //     role: "assistant",
-        //     content:
-        //         "Execute untrusted code safely: Run AI agent output, user uploads, or third-party scripts without exposing your production systems. Build interactive tools: Create code playgrounds, AI-powered UI builders, or developer sandboxes. Test in isolation: Preview how user-submitted or agent-generated code behaves in a self-contained environment with access to logs, file edits, and live previews. Run development servers: Spin up and test applications with live previews. CLI: Use the sandbox CLI for manual testing, agentic workflows, debugging, and one-off operations",
-        //     id: crypto.randomUUID(),
-        // },
-    ]);
+    const [messages, setMessages] = useState<Message[]>([]);
+
     const [showCursor, setShowCursor] = useState(true);
 
     const [loading, setLoading] = useState(false);
 
     useInput(async (input, key) => {
+        if (key.upArrow && messages.length) {
+            const latestUserMessage = messages.at(-2);
+            if (latestUserMessage) setInputValue(latestUserMessage.content);
+        }
+
         if (key.return) {
             if (inputValue.trim()) {
                 const userMessage = {
@@ -62,6 +59,8 @@ export default function App() {
                     id: crypto.randomUUID(),
                     role: "user" as const,
                 };
+
+                setInputValue("");
                 setMessages((prev) => [...prev, userMessage]);
 
                 // sendMessage({text: inputValue});
@@ -81,25 +80,49 @@ export default function App() {
 
                     setLoading(false);
 
+                    const decoder = new TextDecoder("utf-8");
+
                     while (true && reader) {
                         const { done, value } = await reader.read();
 
-                        const textChunk = new TextDecoder("utf-8")
-                            .decode(value)
-                            .trim();
-                        // .replace("data: ", "");
+                        if (done) break;
 
-                        // console.log("chunk", textChunk);
+                        const textChunk = decoder.decode(value).trim();
 
-                        // const { delta } = JSON.parse(repairJson(textChunk));
+                        const parsedChunk = JSON.parse(textChunk);
 
-                        // if (!delta) {
-                        //     // console.log(delta);
+                        const validatedData =
+                            streamingResponseSchema.safeParse(parsedChunk);
 
-                        //     // console.log("delta not found....");
+                        const { data, success } = validatedData;
 
-                        //     continue;
-                        // }
+                        if (!success) {
+                            setMessages((prevMessages) => [
+                                ...prevMessages,
+                                {
+                                    content: "invalid response from server",
+                                    role: "assistant",
+                                    id: messageId,
+                                    type: "error",
+                                },
+                            ]);
+
+                            return;
+                        }
+
+                        if (data.type === "error") {
+                            setMessages((prevMessages) => [
+                                ...prevMessages,
+                                {
+                                    content: data.message,
+                                    role: "assistant",
+                                    id: messageId,
+                                    type: "error",
+                                },
+                            ]);
+
+                            return;
+                        }
 
                         setMessages((prevMessages) => {
                             const existingMessage = prevMessages.find(
@@ -112,8 +135,7 @@ export default function App() {
                                         ? {
                                               ...message,
                                               content:
-                                                  message.content +
-                                                  ` ${textChunk}`,
+                                                  message.content + data.value,
                                           }
                                         : message
                                 );
@@ -122,19 +144,26 @@ export default function App() {
                                 ...prevMessages,
                                 {
                                     id: messageId,
-                                    content: textChunk,
+                                    content: data.value,
                                     role: "assistant",
+                                    type: "token",
                                 },
                             ];
                         });
-
-                        if (done) {
-                            break;
-                        }
                     }
 
                     setInputValue("");
                 } catch (error) {
+                    setMessages((prevMessages) => [
+                        ...prevMessages,
+                        {
+                            content: "Something went wrong",
+                            role: "assistant",
+                            id: crypto.randomUUID(),
+                            type: "error",
+                        },
+                    ]);
+
                     console.error("something went wrong", error);
                 }
             }
@@ -166,7 +195,17 @@ export default function App() {
                                 {isBot ? "❯ Bot " : "❯ You "}
                             </Text>
 
-                            <Text wrap="wrap">{msg.content}</Text>
+                            <Text
+                                color={
+                                    msg.role === "assistant" &&
+                                    msg.type === "error"
+                                        ? "redBright"
+                                        : "white"
+                                }
+                                wrap="wrap"
+                            >
+                                {msg.content}
+                            </Text>
                         </Box>
                     );
                 })}
@@ -188,7 +227,11 @@ export default function App() {
                 alignItems="flex-start"
             >
                 <Text color="white">
-                    {inputValue}
+                    {inputValue ? (
+                        inputValue
+                    ) : (
+                        <Text color="blackBright">ask a question....</Text>
+                    )}
                     <Text
                         backgroundColor={!showCursor ? "black" : "white"}
                         color="black"
